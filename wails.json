@@ -2,6 +2,22 @@
   "$schema": "https://wails.io/schemas/config.v2.json",
   "name": "SimpleReader",
   "outputfilename": "reader",
+  "info": {
+    "companyName": "SimpleReader",
+    "productName": "SimpleReader",
+    "productVersion": "0.2.0",
+    "copyright": "Copyright 2026 SimpleReader",
+    "comments": "A simple Windows PDF reader with mouse annotation.",
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "SimpleReader.pdf",
+        "description": "PDF 文档",
+        "iconName": "appicon",
+        "role": "Editor"
+      }
+    ]
+  },
   "frontend:install": "npm install",
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",

@@ -1,5 +1,23 @@
 export namespace main {
 	
+	export class Bookmark {
+	    id: string;
+	    page: number;
+	    label: string;
+	    createdAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Bookmark(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.page = source["page"];
+	        this.label = source["label"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
 	export class DocInfo {
 	    id: string;
 	    name: string;

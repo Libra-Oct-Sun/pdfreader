@@ -3,13 +3,22 @@
   import * as pdfjsLib from 'pdfjs-dist'
   import type { PDFDocumentLoadingTask, PDFDocumentProxy } from 'pdfjs-dist'
   import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+  import {
+    BlendMode,
+    LineCapStyle,
+    PDFDocument,
+    rgb as pdfRgb
+  } from 'pdf-lib'
   import PdfPage from './PdfPage.svelte'
   import Icon from './Icon.svelte'
-  import type { DocInfo, ReadingState, Stroke, Tool } from './types'
+  import type { Bookmark, DocInfo, ReadingState, Stroke, Tool } from './types'
   import {
+    ExportAnnotatedPDF,
     GetPDFURL,
     GetReadingState,
+    LoadBookmarks,
     LoadStrokes,
+    SaveBookmarks,
     SaveReadingState,
     SaveStrokes,
     SetPageCount
@@ -22,6 +31,13 @@
   export let onDocUpdate: (doc: DocInfo) => void = () => {}
 
   type PageSize = { index: number; width: number; height: number }
+  type OutlineItem = {
+    id: string
+    title: string
+    page: number
+    depth: number
+  }
+  type SidebarTab = 'outline' | 'bookmarks' | 'annotations'
   type HistoryOp =
     | { type: 'add'; stroke: Stroke }
     | { type: 'remove'; stroke: Stroke; index: number }
@@ -54,6 +70,15 @@
   let furthestPage = 1
   let pageInput = 1
   let resumeToast = ''
+  let sidebarOpen = false
+  let sidebarTab: SidebarTab = 'outline'
+  let outlineLoading = false
+  let outlineItems: OutlineItem[] = []
+  let bookmarks: Bookmark[] = []
+  let bookmarksLoaded = false
+  let exporting = false
+  let toastMessage = ''
+  let toastIsError = false
   let passwordNeeded = false
   let passwordInput = ''
   let passwordError = ''
@@ -63,9 +88,13 @@
   let strokeTimer: ReturnType<typeof setTimeout> | undefined
   let resizeTimer: ReturnType<typeof setTimeout> | undefined
   let resumeTimer: ReturnType<typeof setTimeout> | undefined
+  let bookmarkTimer: ReturnType<typeof setTimeout> | undefined
+  let toastTimer: ReturnType<typeof setTimeout> | undefined
   let saveQueue: Promise<void> = Promise.resolve()
+  let bookmarkSaveQueue: Promise<void> = Promise.resolve()
   let destroyed = false
   let strokesLoaded = false
+  let resizeObserver: ResizeObserver | null = null
 
   let initialState: ReadingState = {
     docId: doc.id,
@@ -76,9 +105,14 @@
     updatedAt: 0
   }
   let savedStrokes: Stroke[] = []
+  let savedBookmarks: Bookmark[] = []
+  let currentBookmark: Bookmark | null = null
+  let annotationPages: { page: number; count: number }[] = []
 
   $: totalPages = pageSizes.length || doc.pageCount || 1
   $: contentWidth = maxPageWidth * fitScale * zoom
+  $: currentBookmark = bookmarks.find((item) => item.page === currentPage) || null
+  $: annotationPages = buildAnnotationPages(strokes)
   $: progress =
     totalPages > 0
       ? Math.min(100, (Math.max(furthestPage, currentPage) / totalPages) * 100)
@@ -87,6 +121,8 @@
   onMount(() => {
     void init()
     scroller?.addEventListener('wheel', handleWheel, { passive: false })
+    resizeObserver = new ResizeObserver(() => handleResize())
+    if (scroller) resizeObserver.observe(scroller)
     window.addEventListener('keydown', handleKeydown)
     window.addEventListener('resize', handleResize)
     document.addEventListener('visibilitychange', handleVisibility)
@@ -96,10 +132,13 @@
       window.removeEventListener('resize', handleResize)
       document.removeEventListener('visibilitychange', handleVisibility)
       scroller?.removeEventListener('wheel', handleWheel)
+      resizeObserver?.disconnect()
       if (scrollTimer) clearTimeout(scrollTimer)
       if (strokeTimer) clearTimeout(strokeTimer)
       if (resizeTimer) clearTimeout(resizeTimer)
       if (resumeTimer) clearTimeout(resumeTimer)
+      if (bookmarkTimer) clearTimeout(bookmarkTimer)
+      if (toastTimer) clearTimeout(toastTimer)
       void loadingTask?.destroy()
     }
   })
@@ -111,17 +150,20 @@
   async function init() {
     try {
       strokesLoaded = false
+      bookmarksLoaded = false
       loading = true
       loadingText = '正在打开文档…'
-      const [urlResult, stateResult, strokesResult] = await Promise.all([
+      const [urlResult, stateResult, strokesResult, bookmarksResult] = await Promise.all([
         GetPDFURL(doc.id),
         GetReadingState(doc.id),
-        LoadStrokes(doc.id)
+        LoadStrokes(doc.id),
+        LoadBookmarks(doc.id)
       ])
       pdfUrl = String(urlResult || '')
       if (!pdfUrl) throw new Error('无法读取 PDF 地址')
       initialState = stateResult as unknown as ReadingState
       savedStrokes = (strokesResult as unknown as Stroke[]) || []
+      savedBookmarks = (bookmarksResult as unknown as Bookmark[]) || []
 
       await openPdf(pdfUrl)
       finishOpen()
@@ -161,15 +203,25 @@
     }
     pdf = loaded
     await SetPageCount(doc.id, loaded.numPages)
-    pageSizes = await collectPageSizes(loaded)
-    maxPageWidth = Math.max(...pageSizes.map((page) => page.width), 1)
+    const firstPage = await loaded.getPage(1)
+    const firstViewport = firstPage.getViewport({ scale: 1 })
+    firstPage.cleanup()
+    pageSizes = Array.from({ length: loaded.numPages }, (_, index) => ({
+      index: index + 1,
+      width: firstViewport.width,
+      height: firstViewport.height
+    }))
+    maxPageWidth = firstViewport.width
     fitScale = computeFitScale()
     loading = false
+    void loadOutline(loaded)
   }
 
   function finishOpen() {
     strokes = savedStrokes
     strokesLoaded = true
+    bookmarks = [...savedBookmarks].sort((a, b) => a.page - b.page)
+    bookmarksLoaded = true
     undoStack = []
     redoStack = []
     currentPage = clamp(Math.round(initialState.page || 1), 1, totalPages)
@@ -211,42 +263,289 @@
     }
   }
 
-  async function collectPageSizes(loaded: PDFDocumentProxy): Promise<PageSize[]> {
-    const total = loaded.numPages
-    const sizes: PageSize[] = new Array(total)
-    const batchSize = 24
-    for (let start = 0; start < total; start += batchSize) {
-      if (destroyed) break
-      const end = Math.min(total, start + batchSize)
-      loadingText = `正在读取页面 ${end} / ${total}`
-      const jobs: Promise<void>[] = []
-      for (let index = start; index < end; index += 1) {
-        jobs.push(
-          (async () => {
-            try {
-              const page = await loaded.getPage(index + 1)
-              const viewport = page.getViewport({ scale: 1 })
-              sizes[index] = {
-                index: index + 1,
-                width: viewport.width,
-                height: viewport.height
-              }
-              page.cleanup()
-            } catch (reason) {
-              console.error('read page size', index + 1, reason)
-              sizes[index] = { index: index + 1, width: 612, height: 792 }
-            }
-          })()
-        )
-      }
-      await Promise.all(jobs)
-    }
-    return sizes
-  }
-
   function computeFitScale() {
     const width = scroller?.clientWidth || window.innerWidth || 1000
     return Math.max(0.15, Math.max(320, width - 64) / Math.max(1, maxPageWidth))
+  }
+
+  function handlePageSize(index: number, width: number, height: number) {
+    const current = pageSizes[index - 1]
+    if (
+      !current ||
+      (Math.abs(current.width - width) < 0.5 &&
+        Math.abs(current.height - height) < 0.5)
+    ) {
+      return
+    }
+    const position = computePosition()
+    pageSizes = pageSizes.map((page) =>
+      page.index === index ? { ...page, width, height } : page
+    )
+    maxPageWidth = Math.max(...pageSizes.map((page) => page.width), 1)
+    fitScale = computeFitScale()
+    void tick().then(() => {
+      requestAnimationFrame(() => scrollToPosition(position))
+    })
+  }
+
+  async function loadOutline(loaded: PDFDocumentProxy) {
+    outlineLoading = true
+    outlineItems = []
+    try {
+      const raw = await loaded.getOutline()
+      if (!raw?.length) return
+      const result: OutlineItem[] = []
+      let sequence = 0
+
+      const walk = async (nodes: any[], depth: number) => {
+        for (const node of nodes) {
+          const page = await resolveDestPage(loaded, node.dest)
+          if (page) {
+            result.push({
+              id: `outline-${sequence++}`,
+              title: String(node.title || '未命名'),
+              page,
+              depth
+            })
+          }
+          if (Array.isArray(node.items) && node.items.length) {
+            await walk(node.items, depth + 1)
+          }
+        }
+      }
+
+      await walk(raw, 0)
+      outlineItems = result
+    } catch (reason) {
+      console.error('load outline', reason)
+      outlineItems = []
+    } finally {
+      outlineLoading = false
+    }
+  }
+
+  async function resolveDestPage(loaded: PDFDocumentProxy, dest: any) {
+    try {
+      let target = dest
+      if (typeof target === 'string') {
+        target = await loaded.getDestination(target)
+      }
+      if (!Array.isArray(target) || !target.length) return null
+      const first = target[0]
+      if (typeof first === 'number') {
+        return clamp(Math.round(first) + 1, 1, loaded.numPages)
+      }
+      if (first) {
+        const index = await loaded.getPageIndex(first)
+        return clamp(index + 1, 1, loaded.numPages)
+      }
+    } catch (reason) {
+      console.error('resolve outline destination', reason)
+    }
+    return null
+  }
+
+  function buildAnnotationPages(items: Stroke[]) {
+    const counts = new Map<number, number>()
+    for (const stroke of items) {
+      counts.set(stroke.page, (counts.get(stroke.page) || 0) + 1)
+    }
+    return [...counts.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([page, count]) => ({ page, count }))
+  }
+
+  function toggleSidebar() {
+    sidebarOpen = !sidebarOpen
+    window.setTimeout(handleResize, 80)
+  }
+
+  function openSidebar(tab: SidebarTab) {
+    sidebarTab = tab
+    sidebarOpen = true
+    window.setTimeout(handleResize, 80)
+  }
+
+  function toggleBookmark() {
+    if (!pdf) return
+    const existing = bookmarks.find((item) => item.page === currentPage)
+    if (existing) {
+      bookmarks = bookmarks.filter((item) => item.id !== existing.id)
+      showToast(`已取消第 ${currentPage} 页书签`)
+    } else {
+      bookmarks = [
+        ...bookmarks,
+        {
+          id: crypto.randomUUID(),
+          page: currentPage,
+          label: `第 ${currentPage} 页`,
+          createdAt: Date.now()
+        }
+      ].sort((a, b) => a.page - b.page)
+      showToast(`已收藏第 ${currentPage} 页`)
+    }
+    scheduleSaveBookmarks()
+  }
+
+  function removeBookmark(bookmarkID: string) {
+    bookmarks = bookmarks.filter((item) => item.id !== bookmarkID)
+    scheduleSaveBookmarks()
+  }
+
+  function scheduleSaveBookmarks() {
+    if (!bookmarksLoaded) return
+    if (bookmarkTimer) clearTimeout(bookmarkTimer)
+    bookmarkTimer = setTimeout(() => {
+      const snapshot = bookmarks
+      bookmarkSaveQueue = bookmarkSaveQueue
+        .then(() => SaveBookmarks(doc.id, snapshot as any))
+        .then(() => undefined)
+        .catch((reason) => {
+          console.error('save bookmarks', reason)
+        })
+    }, 400)
+  }
+
+  async function flushBookmarks() {
+    if (!bookmarksLoaded) return
+    if (bookmarkTimer) clearTimeout(bookmarkTimer)
+    const snapshot = bookmarks
+    bookmarkSaveQueue = bookmarkSaveQueue
+      .then(() => SaveBookmarks(doc.id, snapshot as any))
+      .then(() => undefined)
+      .catch((reason) => {
+        console.error('save bookmarks', reason)
+      })
+    await bookmarkSaveQueue
+  }
+
+  async function exportAnnotatedPDF() {
+    if (!pdf || exporting) return
+    exporting = true
+    showToast('正在生成带批注 PDF…')
+    try {
+      const response = await fetch(pdfUrl)
+      if (!response.ok) throw new Error('无法读取原 PDF')
+      const source = await response.arrayBuffer()
+      const exported = await PDFDocument.load(source)
+
+      const grouped = new Map<number, Stroke[]>()
+      for (const stroke of strokes) {
+        const group = grouped.get(stroke.page) || []
+        group.push(stroke)
+        grouped.set(stroke.page, group)
+      }
+
+      for (const [pageNumber, pageStrokes] of grouped) {
+        if (pageNumber < 1 || pageNumber > exported.getPageCount()) continue
+        const page = exported.getPage(pageNumber - 1)
+        const { width, height } = page.getSize()
+        for (const stroke of pageStrokes) {
+          const [red, green, blue] = hexToRgb(stroke.color)
+          const lineWidth = Math.max(0.5, stroke.width * width)
+          const opacity = stroke.tool === 'highlighter' ? 0.32 : 1
+          const blendMode =
+            stroke.tool === 'highlighter' ? BlendMode.Multiply : BlendMode.Normal
+
+          if (stroke.points.length === 1) {
+            const point = stroke.points[0]
+            page.drawCircle({
+              x: point.x * width,
+              y: height - point.y * height,
+              size: lineWidth / 2,
+              color: pdfRgb(red, green, blue),
+              opacity,
+              blendMode
+            })
+            continue
+          }
+
+          const path = stroke.points
+            .map(
+              (point, index) =>
+                `${index === 0 ? 'M' : 'L'} ${(point.x * width).toFixed(2)} ${(
+                  point.y * height
+                ).toFixed(2)}`
+            )
+            .join(' ')
+          page.drawSvgPath(path, {
+            x: 0,
+            y: height,
+            borderColor: pdfRgb(red, green, blue),
+            borderWidth: lineWidth,
+            borderOpacity: opacity,
+            borderLineCap: LineCapStyle.Round,
+            blendMode
+          })
+        }
+      }
+
+      const bytes = await exported.save()
+      const suggested = `${doc.name.replace(/\.pdf$/i, '')}-annotated.pdf`
+      const savedPath = await ExportAnnotatedPDF(
+        suggested,
+        bytesToBase64(bytes)
+      )
+      if (savedPath) {
+        showToast(`已导出：${savedPath}`)
+      } else {
+        showToast('已取消导出')
+      }
+    } catch (reason: any) {
+      const message = readableError(reason)
+      showToast(
+        /encrypt/i.test(message)
+          ? '加密 PDF 暂不支持导出，请先解除密码'
+          : `导出失败：${message}`,
+        true
+      )
+    } finally {
+      exporting = false
+    }
+  }
+
+  function bytesToBase64(bytes: Uint8Array) {
+    let binary = ''
+    const chunkSize = 0x4000
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+      binary += String.fromCharCode(
+        ...bytes.subarray(index, index + chunkSize)
+      )
+    }
+    return btoa(binary)
+  }
+
+  function hexToRgb(value: string): [number, number, number] {
+    const hex = value.replace('#', '')
+    const full =
+      hex.length === 3
+        ? hex
+            .split('')
+            .map((character) => character + character)
+            .join('')
+        : hex
+    const number = Number.parseInt(full, 16)
+    return [
+      ((number >> 16) & 255) / 255,
+      ((number >> 8) & 255) / 255,
+      (number & 255) / 255
+    ]
+  }
+
+  function showToast(message: string, isError = false) {
+    toastMessage = message
+    toastIsError = isError
+    if (toastTimer) clearTimeout(toastTimer)
+    toastTimer = setTimeout(() => {
+      toastMessage = ''
+    }, isError ? 5200 : 3400)
+  }
+
+  function formatBookmarkTime(timestamp: number) {
+    return new Date(timestamp).toLocaleDateString('zh-CN', {
+      month: 'numeric',
+      day: 'numeric'
+    })
   }
 
   function handleResize() {
@@ -444,6 +743,7 @@
     if (document.visibilityState === 'hidden') {
       savePosition()
       void flushStrokes()
+      void flushBookmarks()
     }
   }
 
@@ -451,6 +751,7 @@
     if (pdf) {
       savePosition()
       await flushStrokes()
+      await flushBookmarks()
       onDocUpdate({
         ...doc,
         lastPage: currentPage,
@@ -486,6 +787,21 @@
     if ((event.ctrlKey || event.metaKey) && key === 'y') {
       event.preventDefault()
       redo()
+      return
+    }
+    if ((event.ctrlKey || event.metaKey) && key === 'd') {
+      event.preventDefault()
+      toggleBookmark()
+      return
+    }
+    if ((event.ctrlKey || event.metaKey) && key === 'b') {
+      event.preventDefault()
+      toggleSidebar()
+      return
+    }
+    if ((event.ctrlKey || event.metaKey) && key === 'e') {
+      event.preventDefault()
+      void exportAnnotatedPDF()
       return
     }
     if (event.ctrlKey || event.metaKey) return
@@ -566,6 +882,40 @@
     </div>
 
     <button
+      class="icon-button"
+      class:active={currentBookmark}
+      title={currentBookmark ? '取消当前页书签（Ctrl+D）' : '收藏当前页（Ctrl+D）'}
+      aria-label={currentBookmark ? '取消书签' : '添加书签'}
+      on:click={toggleBookmark}
+    >
+      <Icon name={currentBookmark ? 'bookmark-filled' : 'bookmark'} size={18} />
+    </button>
+
+    <button
+      class="icon-button"
+      title="导出带批注 PDF（Ctrl+E）"
+      aria-label="导出带批注 PDF"
+      disabled={exporting}
+      on:click={exportAnnotatedPDF}
+    >
+      {#if exporting}
+        <span class="mini-spinner dark"></span>
+      {:else}
+        <Icon name="export" size={18} />
+      {/if}
+    </button>
+
+    <button
+      class="icon-button"
+      class:active={sidebarOpen}
+      title="目录、书签和批注（Ctrl+B）"
+      aria-label="打开导航侧栏"
+      on:click={toggleSidebar}
+    >
+      <Icon name="sidebar" size={18} />
+    </button>
+
+    <button
       class="pen-toggle"
       class:active={mode === 'annotate'}
       title={mode === 'annotate' ? '退出批注（P / Esc）' : '开始批注（P）'}
@@ -576,39 +926,147 @@
     </button>
   </header>
 
-  <main class="viewport" bind:this={scroller} on:scroll={handleScroll}>
-    {#if pageSizes.length > 0 && pdf}
-      <div class="pages-layer">
-        <div class="pages" bind:this={pagesHost} style:width={`${contentWidth}px`}>
-          {#each pageSizes as page (page.index)}
-            {@const pageCssWidth = page.width * fitScale * zoom}
-            {@const pageCssHeight = page.height * fitScale * zoom}
-            <div
-              class="page-slot"
-              data-page={page.index}
-              style:width={`${pageCssWidth}px`}
-              style:height={`${pageCssHeight}px`}
-            >
-              <PdfPage
-                {pdf}
-                pageIndex={page.index}
-                pageWidth={page.width}
-                cssWidth={pageCssWidth}
-                cssHeight={pageCssHeight}
-                {mode}
-                {tool}
-                {color}
-                {penWidth}
-                {strokes}
-                onStroke={addStroke}
-                onErase={eraseStroke}
-              />
-            </div>
-          {/each}
+  <div class="reader-body">
+    <main class="viewport" bind:this={scroller} on:scroll={handleScroll}>
+      {#if pageSizes.length > 0 && pdf}
+        <div class="pages-layer">
+          <div class="pages" bind:this={pagesHost} style:width={`${contentWidth}px`}>
+            {#each pageSizes as page (page.index)}
+              {@const pageCssWidth = page.width * fitScale * zoom}
+              {@const pageCssHeight = page.height * fitScale * zoom}
+              <div
+                class="page-slot"
+                data-page={page.index}
+                style:width={`${pageCssWidth}px`}
+                style:height={`${pageCssHeight}px`}
+              >
+                <PdfPage
+                  {pdf}
+                  pageIndex={page.index}
+                  pageWidth={page.width}
+                  pageHeight={page.height}
+                  cssWidth={pageCssWidth}
+                  cssHeight={pageCssHeight}
+                  {mode}
+                  {tool}
+                  {color}
+                  {penWidth}
+                  {strokes}
+                  onStroke={addStroke}
+                  onErase={eraseStroke}
+                  onPageSize={handlePageSize}
+                />
+              </div>
+            {/each}
+          </div>
         </div>
-      </div>
+      {/if}
+    </main>
+
+    {#if sidebarOpen}
+      <aside class="sidebar" aria-label="文档导航">
+        <div class="sidebar-head">
+          <div>
+            <div class="sidebar-kicker">DOCUMENT</div>
+            <div class="sidebar-title">导航</div>
+          </div>
+          <button
+            class="icon-button small"
+            title="关闭侧栏"
+            aria-label="关闭侧栏"
+            on:click={toggleSidebar}
+          >
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+
+        <div class="sidebar-tabs">
+          <button
+            class:active={sidebarTab === 'outline'}
+            on:click={() => (sidebarTab = 'outline')}
+          >
+            目录
+          </button>
+          <button
+            class:active={sidebarTab === 'bookmarks'}
+            on:click={() => (sidebarTab = 'bookmarks')}
+          >
+            书签<span>{bookmarks.length}</span>
+          </button>
+          <button
+            class:active={sidebarTab === 'annotations'}
+            on:click={() => (sidebarTab = 'annotations')}
+          >
+            批注<span>{strokes.length}</span>
+          </button>
+        </div>
+
+        <div class="sidebar-content">
+          {#if sidebarTab === 'outline'}
+            {#if outlineLoading}
+              <div class="sidebar-empty">正在读取目录…</div>
+            {:else if outlineItems.length === 0}
+              <div class="sidebar-empty">这份 PDF 没有可用的目录</div>
+            {:else}
+              {#each outlineItems as item (item.id)}
+                <button
+                  class="outline-item"
+                  style:padding-left={`${12 + item.depth * 16}px`}
+                  title={item.title}
+                  on:click={() => jumpToPage(item.page)}
+                >
+                  <span class="outline-title">{item.title}</span>
+                  <span class="outline-page">{item.page}</span>
+                </button>
+              {/each}
+            {/if}
+          {:else if sidebarTab === 'bookmarks'}
+            <button class="sidebar-action" on:click={toggleBookmark}>
+              <Icon
+                name={currentBookmark ? 'bookmark-filled' : 'bookmark'}
+                size={16}
+              />
+              {currentBookmark ? '取消当前页书签' : `收藏第 ${currentPage} 页`}
+            </button>
+            {#if bookmarks.length === 0}
+              <div class="sidebar-empty">还没有书签</div>
+            {:else}
+              {#each bookmarks as bookmark (bookmark.id)}
+                <div class="bookmark-row">
+                  <button
+                    class="bookmark-main"
+                    on:click={() => jumpToPage(bookmark.page)}
+                  >
+                    <span>{bookmark.label}</span>
+                    <small>{formatBookmarkTime(bookmark.createdAt)}</small>
+                  </button>
+                  <button
+                    class="row-delete"
+                    title="删除书签"
+                    aria-label="删除书签"
+                    on:click={() => removeBookmark(bookmark.id)}
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                </div>
+              {/each}
+            {/if}
+          {:else}
+            {#if annotationPages.length === 0}
+              <div class="sidebar-empty">还没有鼠标批注</div>
+            {:else}
+              {#each annotationPages as item (item.page)}
+                <button class="annotation-row" on:click={() => jumpToPage(item.page)}>
+                  <span class="annotation-page">第 {item.page} 页</span>
+                  <span class="annotation-count">{item.count} 笔</span>
+                </button>
+              {/each}
+            {/if}
+          {/if}
+        </div>
+      </aside>
     {/if}
-  </main>
+  </div>
 
   <div class="progress-track">
     <div class="progress-fill" style:width={`${progress}%`}></div>
@@ -681,6 +1139,10 @@
 
   {#if resumeToast}
     <div class="resume-toast">{resumeToast}</div>
+  {/if}
+
+  {#if toastMessage}
+    <div class="export-toast" class:error={toastIsError}>{toastMessage}</div>
   {/if}
 
   {#if loading}
@@ -774,6 +1236,16 @@
   .icon-button.small {
     width: 28px;
     height: 28px;
+  }
+
+  .icon-button.active {
+    background: #20242b;
+    color: #fff;
+  }
+
+  .icon-button:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
 
   .doc-title {
@@ -878,6 +1350,13 @@
     color: #fff;
   }
 
+  .reader-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+  }
+
   .viewport {
     flex: 1;
     min-height: 0;
@@ -918,6 +1397,232 @@
     height: 100%;
     background: #c8553d;
     transition: width 180ms ease;
+  }
+
+  .sidebar {
+    width: 316px;
+    flex: 0 0 316px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: #fbfaf7;
+    border-left: 1px solid rgba(32, 36, 43, 0.1);
+    box-shadow: -10px 0 30px rgba(32, 36, 43, 0.04);
+    z-index: 15;
+  }
+
+  .sidebar-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 18px 14px 12px 18px;
+  }
+
+  .sidebar-kicker {
+    color: #b0a89b;
+    font-size: 8px;
+    font-weight: 750;
+    letter-spacing: 0.16em;
+  }
+
+  .sidebar-title {
+    margin-top: 4px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+
+  .sidebar-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    padding: 0 12px 10px;
+  }
+
+  .sidebar-tabs button {
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: #827d74;
+    font-size: 10px;
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  .sidebar-tabs button:hover {
+    background: rgba(32, 36, 43, 0.05);
+  }
+
+  .sidebar-tabs button.active {
+    background: #20242b;
+    color: #fff;
+  }
+
+  .sidebar-tabs button span {
+    min-width: 15px;
+    padding: 1px 4px;
+    border-radius: 999px;
+    background: rgba(32, 36, 43, 0.08);
+    font-size: 8px;
+    text-align: center;
+  }
+
+  .sidebar-tabs button.active span {
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  .sidebar-content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0 10px 18px;
+  }
+
+  .sidebar-empty {
+    padding: 28px 14px;
+    color: #a29b90;
+    font-size: 11px;
+    line-height: 1.7;
+    text-align: center;
+  }
+
+  .outline-item {
+    width: 100%;
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: #4c4841;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .outline-item:hover {
+    background: rgba(32, 36, 43, 0.055);
+  }
+
+  .outline-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  .outline-page {
+    flex: 0 0 auto;
+    color: #aaa398;
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sidebar-action {
+    width: 100%;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    margin-bottom: 8px;
+    border: 1px dashed rgba(32, 36, 43, 0.18);
+    border-radius: 9px;
+    background: transparent;
+    color: #5f5a52;
+    font-size: 10px;
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  .sidebar-action:hover {
+    background: #fff;
+  }
+
+  .bookmark-row {
+    display: flex;
+    align-items: stretch;
+    border-bottom: 1px solid rgba(32, 36, 43, 0.06);
+  }
+
+  .bookmark-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 8px 10px 10px;
+    border: 0;
+    background: transparent;
+    color: #4d4942;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .bookmark-main:hover {
+    background: rgba(32, 36, 43, 0.04);
+  }
+
+  .bookmark-main span {
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .bookmark-main small {
+    color: #aaa398;
+    font-size: 9px;
+  }
+
+  .row-delete {
+    width: 28px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: #b2aba0;
+    cursor: pointer;
+  }
+
+  .row-delete:hover {
+    background: #fbe9e5;
+    color: #b23a2a;
+  }
+
+  .annotation-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 11px 10px;
+    border: 0;
+    border-bottom: 1px solid rgba(32, 36, 43, 0.06);
+    background: transparent;
+    color: #4d4942;
+    cursor: pointer;
+  }
+
+  .annotation-row:hover {
+    background: rgba(32, 36, 43, 0.04);
+  }
+
+  .annotation-page {
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .annotation-count {
+    color: #aaa398;
+    font-size: 9px;
   }
 
   .ink-toolbar {
@@ -1032,6 +1737,42 @@
     box-shadow: 0 8px 26px rgba(20, 22, 26, 0.18);
     z-index: 25;
     animation: toast-in 180ms ease-out;
+  }
+
+  .export-toast {
+    position: absolute;
+    top: 70px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: min(560px, calc(100vw - 80px));
+    padding: 9px 15px;
+    border-radius: 10px;
+    background: rgba(32, 36, 43, 0.92);
+    color: #fff;
+    font-size: 11px;
+    line-height: 1.5;
+    text-align: center;
+    box-shadow: 0 8px 26px rgba(20, 22, 26, 0.18);
+    z-index: 26;
+    word-break: break-word;
+  }
+
+  .export-toast.error {
+    background: rgba(150, 48, 35, 0.95);
+  }
+
+  .mini-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(32, 36, 43, 0.15);
+    border-top-color: #c8553d;
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+
+  .mini-spinner.dark {
+    border-color: rgba(32, 36, 43, 0.15);
+    border-top-color: #c8553d;
   }
 
   @keyframes toast-in {

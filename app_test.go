@@ -103,3 +103,21 @@ func TestStrokeRoundTrip(t *testing.T) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }
+
+func TestBookmarkRoundTrip(t *testing.T) {
+	app := &App{bookmarksDir: t.TempDir()}
+	want := []Bookmark{
+		{ID: "bookmark-1", Page: 12, Label: "第 12 页", CreatedAt: 456},
+	}
+
+	if err := app.SaveBookmarks("doc-1", want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.LoadBookmarks("doc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}

@@ -62,5 +62,16 @@
   {:else if name === 'book'}
     <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5v-16z" />
     <path d="M4 18.5A2.5 2.5 0 0 1 6.5 16H20" />
+  {:else if name === 'bookmark'}
+    <path d="M6 4h12v17l-6-4-6 4V4z" />
+  {:else if name === 'bookmark-filled'}
+    <path d="M6 4h12v17l-6-4-6 4V4z" fill="currentColor" stroke="none" />
+  {:else if name === 'export'}
+    <path d="M12 3v12" />
+    <path d="M7 8l5-5 5 5" />
+    <path d="M4 15v5h16v-5" />
+  {:else if name === 'sidebar'}
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M9 4v16" />
   {/if}
 </svg>

@@ -36,3 +36,10 @@ export interface Stroke {
   points: Point[]
   createdAt: number
 }
+
+export interface Bookmark {
+  id: string
+  page: number
+  label: string
+  createdAt: number
+}

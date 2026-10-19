@@ -6,6 +6,7 @@
   export let pdf: PDFDocumentProxy
   export let pageIndex: number
   export let pageWidth: number
+  export let pageHeight: number
   export let cssWidth: number
   export let cssHeight: number
   export let mode: 'read' | 'annotate' = 'read'
@@ -16,6 +17,8 @@
   export let onStroke: (stroke: Stroke) => void = () => {}
   export let onErase: (strokeId: string) => void = () => {}
   export let onVisible: (page: number) => void = () => {}
+  export let onPageSize: (page: number, width: number, height: number) => void =
+    () => {}
 
   let host: HTMLDivElement
   let pdfCanvas: HTMLCanvasElement
@@ -108,6 +111,16 @@
       return
     }
     if (sequence !== renderSequence || !active) {
+      page.cleanup()
+      return
+    }
+
+    const actual = page.getViewport({ scale: 1 })
+    if (
+      Math.abs(actual.width - pageWidth) > 0.5 ||
+      Math.abs(actual.height - pageHeight) > 0.5
+    ) {
+      onPageSize(pageIndex, actual.width, actual.height)
       page.cleanup()
       return
     }

@@ -32,11 +32,17 @@ jobs:
           go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
           "$(go env GOPATH)\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --no-progress -y
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Run tests
         run: go test ./... -count=1
 
       - name: Build Windows executable
-        run: wails build -clean
+        run: wails build -clean -nsis -installscope user
 
       - name: Package release artifacts
         shell: pwsh
@@ -44,10 +50,15 @@ jobs:
           New-Item -ItemType Directory -Force release | Out-Null
           $tag = "${{ github.ref_name }}"
           $exe = "SimpleReader-$tag-windows-amd64.exe"
+          $installer = "SimpleReader-$tag-windows-amd64-installer.exe"
           Copy-Item "build/bin/reader.exe" "release/$exe"
+          Copy-Item "build/bin/SimpleReader-amd64-installer.exe" "release/$installer"
           Compress-Archive -Path "release/$exe" -DestinationPath "release/SimpleReader-$tag-windows-amd64.zip"
-          $hash = (Get-FileHash "release/$exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $exe" | Set-Content "release/SHA256SUMS.txt" -Encoding ascii
+          $hashes = foreach ($file in @($exe, "SimpleReader-$tag-windows-amd64.zip", $installer)) {
+            $hash = (Get-FileHash "release/$file" -Algorithm SHA256).Hash.ToLower()
+            "$hash  $file"
+          }
+          $hashes | Set-Content "release/SHA256SUMS.txt" -Encoding ascii
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -65,12 +76,14 @@ jobs:
             ## 文件
             - `SimpleReader-${{ github.ref_name }}-windows-amd64.exe`
             - `SimpleReader-${{ github.ref_name }}-windows-amd64.zip`
+            - `SimpleReader-${{ github.ref_name }}-windows-amd64-installer.exe`
             - `SHA256SUMS.txt`
 
             数据保存在 `%APPDATA%\SimpleReader`。
           files: |
             release/SimpleReader-${{ github.ref_name }}-windows-amd64.exe
             release/SimpleReader-${{ github.ref_name }}-windows-amd64.zip
+            release/SimpleReader-${{ github.ref_name }}-windows-amd64-installer.exe
             release/SHA256SUMS.txt
           generate_release_notes: true
           draft: false

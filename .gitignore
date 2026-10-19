@@ -6,6 +6,13 @@ frontend/node_modules
 frontend/public/pdfjs
 _debug
 _edge_profile
+_edge_test
 _screenshots
+_test-*.png
+_test-*.pdf
+_export-*
+_debug-*
 SimpleReader.exe
 *.log
+build/windows/appicon.ico
+build/windows/installer/tmp/

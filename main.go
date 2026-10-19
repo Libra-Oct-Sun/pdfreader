@@ -29,6 +29,12 @@ func main() {
 		DragAndDrop: &options.DragAndDrop{
 			EnableFileDrop: true,
 		},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "com.simplereader.pdfreader",
+			OnSecondInstanceLaunch: func(data options.SecondInstanceData) {
+				app.handleSecondInstance(data.Args)
+			},
+		},
 		Bind: []interface{}{
 			app,
 		},
