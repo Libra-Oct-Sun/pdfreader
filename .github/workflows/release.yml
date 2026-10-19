@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and archive release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
+          "$(go env GOPATH)\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run tests
+        run: go test ./... -count=1
+
+      - name: Build Windows executable
+        run: wails build -clean
+
+      - name: Package release artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          $tag = "${{ github.ref_name }}"
+          $exe = "SimpleReader-$tag-windows-amd64.exe"
+          Copy-Item "build/bin/reader.exe" "release/$exe"
+          Compress-Archive -Path "release/$exe" -DestinationPath "release/SimpleReader-$tag-windows-amd64.zip"
+          $hash = (Get-FileHash "release/$exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $exe" | Set-Content "release/SHA256SUMS.txt" -Encoding ascii
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: SimpleReader ${{ github.ref_name }}
+          body: |
+            Windows 便携版，解压或直接运行即可。需要系统已安装 WebView2 Runtime（Windows 11 自带）。
+
+            ## 功能
+            - 鼠标钢笔、荧光笔、整笔橡皮、撤销/重做
+            - 自动记录并恢复阅读位置
+            - 本地保存笔迹，不上传文件
+            - 支持拖拽、命令行和最近文件打开
+
+            ## 文件
+            - `SimpleReader-${{ github.ref_name }}-windows-amd64.exe`
+            - `SimpleReader-${{ github.ref_name }}-windows-amd64.zip`
+            - `SHA256SUMS.txt`
+
+            数据保存在 `%APPDATA%\SimpleReader`。
+          files: |
+            release/SimpleReader-${{ github.ref_name }}-windows-amd64.exe
+            release/SimpleReader-${{ github.ref_name }}-windows-amd64.zip
+            release/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false

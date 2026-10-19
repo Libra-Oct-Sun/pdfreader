@@ -1,5 +1,7 @@
 # SimpleReader
 
+[![CI](https://github.com/Libra-Oct-Sun/pdfreader/actions/workflows/ci.yml/badge.svg)](https://github.com/Libra-Oct-Sun/pdfreader/actions/workflows/ci.yml)
+
 一个面向 Windows 的轻量 PDF 阅读器：**打开即续读，笔落即批注，退出即保存**。
 
 鼠标就是笔。没有压感、掌拒和复杂批注管理，第一版只把阅读位置和鼠标批注做扎实。
@@ -46,6 +48,25 @@ wails build
 ```
 
 产物在 `build/bin/reader.exe`。
+
+本地一次跑完所有检查：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check.ps1
+```
+
+## 测试与发布
+
+- 推送到 `main` 或提交 Pull Request：自动运行 Go 测试、Svelte 检查、前端生产构建和 Windows 应用构建
+- 推送 `v*` 标签：自动构建 Windows 可执行文件、打包 zip、生成 SHA-256，并创建 GitHub Release
+- Release 产物包括便携版 exe、zip 和校验文件
+
+创建存档版本：
+
+```powershell
+git tag -a v0.1.0 -m "SimpleReader v0.1.0"
+git push origin v0.1.0
+```
 
 ## 使用
 
