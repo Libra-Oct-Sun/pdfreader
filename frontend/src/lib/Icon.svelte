@@ -73,5 +73,7 @@
   {:else if name === 'sidebar'}
     <rect x="3" y="4" width="18" height="16" rx="2" />
     <path d="M9 4v16" />
+  {:else if name === 'text'}
+    <path d="M5 5h14M12 5v14M8 19h8" />
   {/if}
 </svg>

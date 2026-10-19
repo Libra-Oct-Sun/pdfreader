@@ -14,6 +14,8 @@ export function LoadBookmarks(arg1:string):Promise<Array<main.Bookmark>>;
 
 export function LoadStrokes(arg1:string):Promise<Array<main.Stroke>>;
 
+export function LoadTexts(arg1:string):Promise<Array<main.TextNote>>;
+
 export function OpenPDF():Promise<main.DocInfo>;
 
 export function OpenPath(arg1:string):Promise<main.DocInfo>;
@@ -27,6 +29,8 @@ export function SaveBookmarks(arg1:string,arg2:Array<main.Bookmark>):Promise<voi
 export function SaveReadingState(arg1:main.ReadingState):Promise<void>;
 
 export function SaveStrokes(arg1:string,arg2:Array<main.Stroke>):Promise<void>;
+
+export function SaveTexts(arg1:string,arg2:Array<main.TextNote>):Promise<void>;
 
 export function SetPageCount(arg1:string,arg2:number):Promise<void>;
 

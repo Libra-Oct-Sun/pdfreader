@@ -126,6 +126,34 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class TextNote {
+	    id: string;
+	    page: number;
+	    x: number;
+	    y: number;
+	    width: number;
+	    size: number;
+	    color: string;
+	    text: string;
+	    createdAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TextNote(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.page = source["page"];
+	        this.x = source["x"];
+	        this.y = source["y"];
+	        this.width = source["width"];
+	        this.size = source["size"];
+	        this.color = source["color"];
+	        this.text = source["text"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
 
 }
 

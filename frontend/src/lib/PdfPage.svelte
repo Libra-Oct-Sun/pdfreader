@@ -275,7 +275,7 @@
   }
 
   function handlePointerDown(event: PointerEvent) {
-    if (mode !== 'annotate' || event.button !== 0) return
+    if (mode !== 'annotate' || tool === 'text' || event.button !== 0) return
     event.preventDefault()
     const point = pointFromEvent(event)
 

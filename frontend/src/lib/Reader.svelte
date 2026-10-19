@@ -9,18 +9,30 @@
     PDFDocument,
     rgb as pdfRgb
   } from 'pdf-lib'
+  import type { PDFFont } from 'pdf-lib'
+  import fontkit from '@pdf-lib/fontkit'
   import PdfPage from './PdfPage.svelte'
+  import TextLayer from './TextLayer.svelte'
   import Icon from './Icon.svelte'
-  import type { Bookmark, DocInfo, ReadingState, Stroke, Tool } from './types'
+  import type {
+    Bookmark,
+    DocInfo,
+    ReadingState,
+    Stroke,
+    TextNote,
+    Tool
+  } from './types'
   import {
     ExportAnnotatedPDF,
     GetPDFURL,
     GetReadingState,
     LoadBookmarks,
+    LoadTexts,
     LoadStrokes,
     SaveBookmarks,
     SaveReadingState,
     SaveStrokes,
+    SaveTexts,
     SetPageCount
   } from '../../wailsjs/go/main/App.js'
 
@@ -76,6 +88,11 @@
   let outlineItems: OutlineItem[] = []
   let bookmarks: Bookmark[] = []
   let bookmarksLoaded = false
+  let texts: TextNote[] = []
+  let textsLoaded = false
+  let selectedTextID: string | null = null
+  let editingTextID: string | null = null
+  let textSize = 16
   let exporting = false
   let toastMessage = ''
   let toastIsError = false
@@ -89,9 +106,11 @@
   let resizeTimer: ReturnType<typeof setTimeout> | undefined
   let resumeTimer: ReturnType<typeof setTimeout> | undefined
   let bookmarkTimer: ReturnType<typeof setTimeout> | undefined
+  let textTimer: ReturnType<typeof setTimeout> | undefined
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let saveQueue: Promise<void> = Promise.resolve()
   let bookmarkSaveQueue: Promise<void> = Promise.resolve()
+  let textSaveQueue: Promise<void> = Promise.resolve()
   let destroyed = false
   let strokesLoaded = false
   let resizeObserver: ResizeObserver | null = null
@@ -106,13 +125,19 @@
   }
   let savedStrokes: Stroke[] = []
   let savedBookmarks: Bookmark[] = []
+  let savedTexts: TextNote[] = []
   let currentBookmark: Bookmark | null = null
-  let annotationPages: { page: number; count: number }[] = []
+  let annotationPages: {
+    page: number
+    strokes: number
+    texts: number
+  }[] = []
+  let exportFontBytes: ArrayBuffer | null = null
 
   $: totalPages = pageSizes.length || doc.pageCount || 1
   $: contentWidth = maxPageWidth * fitScale * zoom
   $: currentBookmark = bookmarks.find((item) => item.page === currentPage) || null
-  $: annotationPages = buildAnnotationPages(strokes)
+  $: annotationPages = buildAnnotationPages(strokes, texts)
   $: progress =
     totalPages > 0
       ? Math.min(100, (Math.max(furthestPage, currentPage) / totalPages) * 100)
@@ -138,6 +163,7 @@
       if (resizeTimer) clearTimeout(resizeTimer)
       if (resumeTimer) clearTimeout(resumeTimer)
       if (bookmarkTimer) clearTimeout(bookmarkTimer)
+      if (textTimer) clearTimeout(textTimer)
       if (toastTimer) clearTimeout(toastTimer)
       void loadingTask?.destroy()
     }
@@ -151,19 +177,23 @@
     try {
       strokesLoaded = false
       bookmarksLoaded = false
+      textsLoaded = false
       loading = true
       loadingText = '正在打开文档…'
-      const [urlResult, stateResult, strokesResult, bookmarksResult] = await Promise.all([
-        GetPDFURL(doc.id),
-        GetReadingState(doc.id),
-        LoadStrokes(doc.id),
-        LoadBookmarks(doc.id)
-      ])
+      const [urlResult, stateResult, strokesResult, bookmarksResult, textsResult] =
+        await Promise.all([
+          GetPDFURL(doc.id),
+          GetReadingState(doc.id),
+          LoadStrokes(doc.id),
+          LoadBookmarks(doc.id),
+          LoadTexts(doc.id)
+        ])
       pdfUrl = String(urlResult || '')
       if (!pdfUrl) throw new Error('无法读取 PDF 地址')
       initialState = stateResult as unknown as ReadingState
       savedStrokes = (strokesResult as unknown as Stroke[]) || []
       savedBookmarks = (bookmarksResult as unknown as Bookmark[]) || []
+      savedTexts = (textsResult as unknown as TextNote[]) || []
 
       await openPdf(pdfUrl)
       finishOpen()
@@ -222,6 +252,10 @@
     strokesLoaded = true
     bookmarks = [...savedBookmarks].sort((a, b) => a.page - b.page)
     bookmarksLoaded = true
+    texts = savedTexts
+    textsLoaded = true
+    selectedTextID = null
+    editingTextID = null
     undoStack = []
     redoStack = []
     currentPage = clamp(Math.round(initialState.page || 1), 1, totalPages)
@@ -345,14 +379,28 @@
     return null
   }
 
-  function buildAnnotationPages(items: Stroke[]) {
-    const counts = new Map<number, number>()
+  function buildAnnotationPages(items: Stroke[], notes: TextNote[]) {
+    const pages = new Map<number, { page: number; strokes: number; texts: number }>()
     for (const stroke of items) {
-      counts.set(stroke.page, (counts.get(stroke.page) || 0) + 1)
+      const entry = pages.get(stroke.page) || {
+        page: stroke.page,
+        strokes: 0,
+        texts: 0
+      }
+      entry.strokes += 1
+      pages.set(stroke.page, entry)
     }
-    return [...counts.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([page, count]) => ({ page, count }))
+    for (const note of notes) {
+      if (!note.text.trim()) continue
+      const entry = pages.get(note.page) || {
+        page: note.page,
+        strokes: 0,
+        texts: 0
+      }
+      entry.texts += 1
+      pages.set(note.page, entry)
+    }
+    return [...pages.values()].sort((a, b) => a.page - b.page)
   }
 
   function toggleSidebar() {
@@ -419,6 +467,121 @@
     await bookmarkSaveQueue
   }
 
+  function pageCSSWidth(pageNumber: number) {
+    const page = pageSizes[pageNumber - 1]
+    return page ? page.width * fitScale * zoom : 0
+  }
+
+  function createText(page: number, x: number, y: number) {
+    const width = pageCSSWidth(page)
+    if (!width) return
+    const note: TextNote = {
+      id: crypto.randomUUID(),
+      page,
+      x: clamp(x, 0, 1 - 0.22),
+      y: clamp(y, 0, 0.92),
+      width: Math.min(0.36, 220 / width),
+      size: textSize / width,
+      color,
+      text: '',
+      createdAt: Date.now()
+    }
+    texts = [...texts, note]
+    selectedTextID = note.id
+    editingTextID = note.id
+    scheduleSaveTexts()
+  }
+
+  function updateText(id: string, patch: Partial<TextNote>) {
+    texts = texts.map((note) => (note.id === id ? { ...note, ...patch } : note))
+    scheduleSaveTexts()
+  }
+
+  function deleteText(id: string) {
+    texts = texts.filter((note) => note.id !== id)
+    if (selectedTextID === id) selectedTextID = null
+    if (editingTextID === id) editingTextID = null
+    scheduleSaveTexts()
+  }
+
+  function selectText(id: string | null) {
+    selectedTextID = id
+    if (editingTextID !== id) editingTextID = null
+  }
+
+  function editText(id: string) {
+    selectedTextID = id
+    editingTextID = id
+  }
+
+  function finishTextEdit() {
+    editingTextID = null
+  }
+
+  function chooseColor(swatch: string) {
+    color = swatch
+    if (tool === 'eraser') tool = 'pen'
+    if (selectedTextID && tool === 'text') {
+      updateText(selectedTextID, { color: swatch })
+    }
+  }
+
+  function changeTextSize(value: number) {
+    textSize = clamp(Math.round(value), 10, 36)
+    if (selectedTextID) {
+      const note = texts.find((item) => item.id === selectedTextID)
+      if (note) {
+        const width = pageCSSWidth(note.page)
+        if (width) updateText(note.id, { size: textSize / width })
+      }
+    }
+  }
+
+  function toggleAnnotateMode() {
+    if (mode === 'annotate') {
+      mode = 'read'
+      editingTextID = null
+      selectedTextID = null
+    } else {
+      mode = 'annotate'
+    }
+  }
+
+  function setTool(next: Tool) {
+    tool = next
+    if (next !== 'text') {
+      selectedTextID = null
+      editingTextID = null
+    }
+  }
+
+  function scheduleSaveTexts() {
+    if (!textsLoaded) return
+    if (textTimer) clearTimeout(textTimer)
+    textTimer = setTimeout(() => {
+      const snapshot = texts
+      textSaveQueue = textSaveQueue
+        .then(() => SaveTexts(doc.id, snapshot as any))
+        .then(() => undefined)
+        .catch((reason) => {
+          console.error('save texts', reason)
+        })
+    }, 450)
+  }
+
+  async function flushTexts() {
+    if (!textsLoaded) return
+    if (textTimer) clearTimeout(textTimer)
+    const snapshot = texts
+    textSaveQueue = textSaveQueue
+      .then(() => SaveTexts(doc.id, snapshot as any))
+      .then(() => undefined)
+      .catch((reason) => {
+        console.error('save texts', reason)
+      })
+    await textSaveQueue
+  }
+
   async function exportAnnotatedPDF() {
     if (!pdf || exporting) return
     exporting = true
@@ -480,6 +643,67 @@
         }
       }
 
+      const visibleTexts = texts.filter((note) => note.text.trim())
+      if (visibleTexts.length) {
+        const font = await getExportFont(exported)
+        const textPages = new Map<number, TextNote[]>()
+        for (const note of visibleTexts) {
+          const group = textPages.get(note.page) || []
+          group.push(note)
+          textPages.set(note.page, group)
+        }
+
+        for (const [pageNumber, pageNotes] of textPages) {
+          if (pageNumber < 1 || pageNumber > exported.getPageCount()) continue
+          const page = exported.getPage(pageNumber - 1)
+          const { width, height } = page.getSize()
+          for (const note of pageNotes) {
+            const [red, green, blue] = hexToRgb(note.color)
+            const size = Math.max(4, note.size * width)
+            const boxWidth = Math.max(24, note.width * width)
+            const padding = Math.max(2, size * 0.45)
+            const lines = wrapPdfText(
+              note.text.trim(),
+              font,
+              size,
+              Math.max(12, boxWidth - padding * 2)
+            )
+            const lineHeight = size * 1.38
+            const boxHeight = Math.max(
+              size * 1.7,
+              lines.length * lineHeight + padding * 2
+            )
+            const x = clamp(note.x * width, 0, width - boxWidth)
+            const top = height - note.y * height
+            const y = Math.max(0, top - boxHeight)
+
+            page.drawRectangle({
+              x,
+              y,
+              width: boxWidth,
+              height: boxHeight,
+              color: pdfRgb(1, 0.99, 0.96),
+              opacity: 0.92,
+              borderColor: pdfRgb(0.78, 0.73, 0.65),
+              borderWidth: 0.5,
+              borderOpacity: 0.5
+            })
+
+            let baseline = y + boxHeight - padding - size
+            for (const line of lines) {
+              page.drawText(line, {
+                x: x + padding,
+                y: baseline,
+                size,
+                font,
+                color: pdfRgb(red, green, blue)
+              })
+              baseline -= lineHeight
+            }
+          }
+        }
+      }
+
       const bytes = await exported.save()
       const suggested = `${doc.name.replace(/\.pdf$/i, '')}-annotated.pdf`
       const savedPath = await ExportAnnotatedPDF(
@@ -513,6 +737,45 @@
       )
     }
     return btoa(binary)
+  }
+
+  async function getExportFont(document: PDFDocument): Promise<PDFFont> {
+    if (!exportFontBytes) {
+      const response = await fetch('/fonts/NotoSansSC-Regular.otf')
+      if (!response.ok) throw new Error('无法加载导出字体')
+      exportFontBytes = await response.arrayBuffer()
+    }
+    document.registerFontkit(fontkit)
+    // CID-keyed CJK fonts break when pdf-lib subsets them. Embedding the
+    // complete font keeps the exported text valid across PDF readers.
+    return document.embedFont(exportFontBytes, { subset: false })
+  }
+
+  function wrapPdfText(
+    text: string,
+    font: PDFFont,
+    size: number,
+    maxWidth: number
+  ) {
+    const lines: string[] = []
+    for (const paragraph of text.split('\n')) {
+      if (!paragraph) {
+        lines.push('')
+        continue
+      }
+      let line = ''
+      for (const character of paragraph) {
+        const next = line + character
+        if (!line || font.widthOfTextAtSize(next, size) <= maxWidth) {
+          line = next
+        } else {
+          lines.push(line)
+          line = character
+        }
+      }
+      lines.push(line)
+    }
+    return lines
   }
 
   function hexToRgb(value: string): [number, number, number] {
@@ -744,6 +1007,7 @@
       savePosition()
       void flushStrokes()
       void flushBookmarks()
+      void flushTexts()
     }
   }
 
@@ -752,6 +1016,7 @@
       savePosition()
       await flushStrokes()
       await flushBookmarks()
+      await flushTexts()
       onDocUpdate({
         ...doc,
         lastPage: currentPage,
@@ -806,11 +1071,28 @@
     }
     if (event.ctrlKey || event.metaKey) return
 
+    if (
+      (event.key === 'Delete' || event.key === 'Backspace') &&
+      selectedTextID &&
+      editingTextID === null
+    ) {
+      event.preventDefault()
+      deleteText(selectedTextID)
+      return
+    }
+
     if (key === 'p') {
       event.preventDefault()
-      mode = mode === 'annotate' ? 'read' : 'annotate'
+      toggleAnnotateMode()
     } else if (event.key === 'Escape') {
-      mode = 'read'
+      if (editingTextID) {
+        editingTextID = null
+      } else if (tool === 'text') {
+        tool = 'pen'
+        selectedTextID = null
+      } else {
+        mode = 'read'
+      }
     } else if (event.key === '+' || event.key === '=') {
       event.preventDefault()
       void applyZoom(zoom + 0.15)
@@ -919,7 +1201,7 @@
       class="pen-toggle"
       class:active={mode === 'annotate'}
       title={mode === 'annotate' ? '退出批注（P / Esc）' : '开始批注（P）'}
-      on:click={() => (mode = mode === 'annotate' ? 'read' : 'annotate')}
+      on:click={toggleAnnotateMode}
     >
       <Icon name="pen" size={17} />
       <span>{mode === 'annotate' ? '批注中' : '批注'}</span>
@@ -955,6 +1237,22 @@
                   onStroke={addStroke}
                   onErase={eraseStroke}
                   onPageSize={handlePageSize}
+                />
+                <TextLayer
+                  pageIndex={page.index}
+                  cssWidth={pageCssWidth}
+                  cssHeight={pageCssHeight}
+                  notes={texts.filter((note) => note.page === page.index)}
+                  {mode}
+                  {tool}
+                  selectedID={selectedTextID}
+                  editingID={editingTextID}
+                  onSelect={selectText}
+                  onEdit={editText}
+                  onUpdate={updateText}
+                  onDelete={deleteText}
+                  onCreate={createText}
+                  onFinishEdit={finishTextEdit}
                 />
               </div>
             {/each}
@@ -997,7 +1295,7 @@
             class:active={sidebarTab === 'annotations'}
             on:click={() => (sidebarTab = 'annotations')}
           >
-            批注<span>{strokes.length}</span>
+            批注<span>{strokes.length + texts.length}</span>
           </button>
         </div>
 
@@ -1058,7 +1356,9 @@
               {#each annotationPages as item (item.page)}
                 <button class="annotation-row" on:click={() => jumpToPage(item.page)}>
                   <span class="annotation-page">第 {item.page} 页</span>
-                  <span class="annotation-count">{item.count} 笔</span>
+                  <span class="annotation-count">
+                    {#if item.strokes}{item.strokes} 笔{/if}{#if item.strokes && item.texts} · {/if}{#if item.texts}{item.texts} 文字{/if}
+                  </span>
                 </button>
               {/each}
             {/if}
@@ -1078,7 +1378,7 @@
         class="tool-button"
         class:selected={tool === 'pen'}
         title="钢笔"
-        on:click={() => (tool = 'pen')}
+        on:click={() => setTool('pen')}
       >
         <Icon name="pen" size={18} />
       </button>
@@ -1086,7 +1386,7 @@
         class="tool-button"
         class:selected={tool === 'highlighter'}
         title="荧光笔"
-        on:click={() => (tool = 'highlighter')}
+        on:click={() => setTool('highlighter')}
       >
         <Icon name="highlighter" size={18} />
       </button>
@@ -1094,9 +1394,17 @@
         class="tool-button"
         class:selected={tool === 'eraser'}
         title="整笔擦除"
-        on:click={() => (tool = 'eraser')}
+        on:click={() => setTool('eraser')}
       >
         <Icon name="eraser" size={18} />
+      </button>
+      <button
+        class="tool-button"
+        class:selected={tool === 'text'}
+        title="文字批注"
+        on:click={() => setTool('text')}
+      >
+        <Icon name="text" size={18} />
       </button>
 
       <div class="toolbar-divider"></div>
@@ -1108,19 +1416,32 @@
           style:background={swatch}
           title={`颜色 ${swatch}`}
           aria-label={`选择颜色 ${swatch}`}
-          on:click={() => {
-            color = swatch
-            if (tool === 'eraser') tool = 'pen'
-          }}
+          on:click={() => chooseColor(swatch)}
         ></button>
       {/each}
 
       <div class="toolbar-divider"></div>
 
-      <label class="width-control" title="线宽">
-        <span class="width-dot" style:width={`${penWidth + 2}px`} style:height={`${penWidth + 2}px`}></span>
-        <input type="range" min="1" max="8" step="0.5" bind:value={penWidth} />
-      </label>
+      {#if tool === 'text' || selectedTextID}
+        <label class="text-size-control" title="文字大小">
+          <span class="text-size-label">A</span>
+          <input
+            type="range"
+            min="10"
+            max="36"
+            step="1"
+            value={textSize}
+            on:input={(event) =>
+              changeTextSize(Number((event.currentTarget as HTMLInputElement).value))}
+          />
+          <span class="text-size-value">{textSize}</span>
+        </label>
+      {:else}
+        <label class="width-control" title="线宽">
+          <span class="width-dot" style:width={`${penWidth + 2}px`} style:height={`${penWidth + 2}px`}></span>
+          <input type="range" min="1" max="8" step="0.5" bind:value={penWidth} />
+        </label>
+      {/if}
 
       <div class="toolbar-divider"></div>
 
@@ -1380,6 +1701,7 @@
   }
 
   .page-slot {
+    position: relative;
     flex: 0 0 auto;
   }
 
@@ -1706,6 +2028,31 @@
   .width-control input {
     width: 62px;
     accent-color: #c8553d;
+  }
+
+  .text-size-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 4px;
+    color: #f6f4ef;
+  }
+
+  .text-size-label {
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .text-size-control input {
+    width: 58px;
+    accent-color: #c8553d;
+  }
+
+  .text-size-value {
+    min-width: 14px;
+    color: rgba(246, 244, 239, 0.65);
+    font-size: 9px;
+    text-align: right;
   }
 
   .done-button {

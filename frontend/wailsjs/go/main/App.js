@@ -26,6 +26,10 @@ export function LoadStrokes(arg1) {
   return window['go']['main']['App']['LoadStrokes'](arg1);
 }
 
+export function LoadTexts(arg1) {
+  return window['go']['main']['App']['LoadTexts'](arg1);
+}
+
 export function OpenPDF() {
   return window['go']['main']['App']['OpenPDF']();
 }
@@ -52,6 +56,10 @@ export function SaveReadingState(arg1) {
 
 export function SaveStrokes(arg1, arg2) {
   return window['go']['main']['App']['SaveStrokes'](arg1, arg2);
+}
+
+export function SaveTexts(arg1, arg2) {
+  return window['go']['main']['App']['SaveTexts'](arg1, arg2);
 }
 
 export function SetPageCount(arg1, arg2) {

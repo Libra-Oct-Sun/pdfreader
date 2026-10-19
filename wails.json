@@ -5,7 +5,7 @@
   "info": {
     "companyName": "SimpleReader",
     "productName": "SimpleReader",
-    "productVersion": "0.2.0",
+    "productVersion": "0.2.1",
     "copyright": "Copyright 2026 SimpleReader",
     "comments": "A simple Windows PDF reader with mouse annotation.",
     "fileAssociations": [

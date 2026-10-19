@@ -121,3 +121,31 @@ func TestBookmarkRoundTrip(t *testing.T) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }
+
+func TestTextNoteRoundTrip(t *testing.T) {
+	app := &App{textsDir: t.TempDir()}
+	want := []TextNote{
+		{
+			ID:        "text-1",
+			Page:      5,
+			X:         0.2,
+			Y:         0.3,
+			Width:     0.3,
+			Size:      0.02,
+			Color:     "#1f2937",
+			Text:      "这里是一段备注",
+			CreatedAt: 789,
+		},
+	}
+
+	if err := app.SaveTexts("doc-1", want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.LoadTexts("doc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}

@@ -25,7 +25,7 @@ export interface Point {
   y: number
 }
 
-export type Tool = 'pen' | 'highlighter' | 'eraser'
+export type Tool = 'pen' | 'highlighter' | 'eraser' | 'text'
 
 export interface Stroke {
   id: string
@@ -41,5 +41,17 @@ export interface Bookmark {
   id: string
   page: number
   label: string
+  createdAt: number
+}
+
+export interface TextNote {
+  id: string
+  page: number
+  x: number
+  y: number
+  width: number
+  size: number
+  color: string
+  text: string
   createdAt: number
 }

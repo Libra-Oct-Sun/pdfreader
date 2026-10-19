@@ -7,7 +7,11 @@ frontend/public/pdfjs
 _debug
 _edge_profile
 _edge_test
+_edge_*
 _screenshots
+_test*
+_text*
+_font_work
 _test-*.png
 _test-*.pdf
 _export-*

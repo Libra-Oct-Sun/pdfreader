@@ -11,6 +11,7 @@
 - 打开 PDF、最近文件、拖拽打开、命令行打开
 - 连续滚动、适宽显示、缩放、页码跳转
 - 鼠标钢笔、荧光笔、整笔橡皮、颜色、线宽、撤销/重做
+- 页面文字批注框：点击添加、双击编辑、拖动移动、删除、调整字号和颜色
 - 阅读位置自动保存与恢复（页码 + 页内偏移 + 缩放）
 - 笔迹按页面归一化坐标保存，缩放后仍然对齐
 - PDF 目录、手动书签和批注页面侧栏
@@ -28,6 +29,7 @@
 - pdf.js：PDF 渲染和文本字体处理
 - Canvas：鼠标墨迹层
 - pdf-lib：把笔迹以矢量路径写入导出的 PDF
+- Noto Sans CJK + fontkit：导出中文文字批注
 
 PDF 文件通过 Go 启动的 `127.0.0.1` 临时只读服务传给 pdf.js，避免把整份 PDF 转成 base64 占用额外内存。
 
@@ -84,8 +86,8 @@ powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 创建存档版本：
 
 ```powershell
-git tag -a v0.2.0 -m "SimpleReader v0.2.0"
-git push origin v0.2.0
+git tag -a v0.2.1 -m "SimpleReader v0.2.1"
+git push origin v0.2.1
 ```
 
 ## 使用
@@ -100,6 +102,7 @@ git push origin v0.2.0
 - `Ctrl + B`：打开/关闭目录、书签和批注侧栏
 - `Ctrl + E`：导出带批注 PDF
 - 右下角工具栏：钢笔、荧光笔、橡皮、颜色、线宽、撤销、完成
+- 文字工具：选择工具栏里的 `T`，点击页面添加文字；双击已有文字编辑，拖动可移动，`Delete` 删除
 
 ## 数据位置
 
@@ -108,6 +111,7 @@ git push origin v0.2.0
   library.json          # 最近文档和阅读位置
   notes/<docId>.json    # 每份文档的鼠标笔迹
   bookmarks/<docId>.json # 每份文档的手动书签
+  texts/<docId>.json    # 每份文档的文字批注
 ```
 
 文档 ID 是 PDF 内容的 SHA-256，文件改名或移动后仍能识别阅读位置。
@@ -115,6 +119,8 @@ git push origin v0.2.0
 ## 当前边界
 
 当前版本不做账号、云同步、OCR、文本选择/搜索、多标签和手写转文字。
+
+含文字批注的导出 PDF 会嵌入完整中文字体，文件会增加约 16MB；只导出鼠标笔迹时不会增加这部分体积。
 
 后续比较自然的方向：
 
